@@ -3,13 +3,6 @@ import functools
 import math
 import random
 
-# constants
-fps = 60
-
-# globals
-frame = 0
-sim_speed = 5
-
 terminal_lines = []
 def debug(*args):
     text = " ".join(str(a) for a in args)
@@ -23,8 +16,12 @@ class Player:
         self.index = index
         self.spawnpoint = spawnpoint
 
+unit_id = 0
 class Unit:
     def __init__(self, player):
+        global unit_id
+        self.id = unit_id
+        unit_id += 1
         self.player = player
         self.personality = random.randint(1, 255)
         self.skin = (random.randint(1, 255),
@@ -47,10 +44,13 @@ class Model:
     def setup(self, num_players, map_w, map_h):
         if self.initialized:
             return
+        self.tick_no = 0
         self.map_w = map_w
         self.map_h = map_h
         self.map = {}
         self.units = []
+        self.dead = set()  # coordinates where something died
+        self.moves = {}  # new -> old
         for x in range(map_w):
             for y in range(map_h):
                 self.map[(x, y)] = None
@@ -72,29 +72,43 @@ class Model:
             self.new_map[pos] = unit
 
     def enqueue_move(self, x, y, dx, dy, detour=False):
+        unit = self.map[(x, y)]
+        if not unit:
+            return
         new_x = max(0, min(x + dx, self.map_w - 1))
         new_y = max(0, min(y + dy, self.map_h - 1))
-        if self.new_map[(new_x, new_y)]:
-            # occupied, cannot move there
-            if not detour:
+        occupied = self.new_map[(new_x, new_y)]
+        if occupied:
+            if occupied.player.index != unit.player.index:
+                # collide, killing both units
+                self.dead.add((new_x, new_y))
+                self.new_map[(x, y)] = None
+                self.new_map[(new_x, new_y)] = None
                 return
-            dx = ((dx + 1) % 2) - 1
-            dy = ((dy + 1) % 2) - 1
-            self.enqueue_move(x, y, dx, dy, detour=False)
+            if detour:
+                # it's one of our own, just try once to move around it
+                dx = ((dx + 1) % 2) - 1
+                dy = ((dy + 1) % 2) - 1
+                self.enqueue_move(x, y, dx, dy, detour=False)
             return
+        self.moves[(new_x, new_y)] = (x, y)
         self.new_map[(new_x, new_y)] = self.new_map[(x, y)]
         self.new_map[(x, y)] = None
 
     def execute_moves(self):
         self.map = dict(self.new_map)
-        self.new_map
 
     def spawn_phase(self):
         for player in self.players:
             self.spawn(Unit(player), player.spawnpoint)
 
     def tick(self):
-        self.spawn_phase()
+        move_speed = 1
+        spawn_rate = 5
+        if self.tick_no % spawn_rate == 0:
+            self.spawn_phase()
+        self.dead.clear()
+        self.moves.clear()
         def move(x, y):
             unit = self.map[(x, y)]
             if not unit:
@@ -109,22 +123,35 @@ class Model:
             if unit.player.index == 1:
                 dy = 1
             self.enqueue_move(x, y, dx, dy, detour=True)
-        self.for_all_squares(move)
+        if self.tick_no % move_speed == 0:
+            self.for_all_squares(move)
         self.execute_moves()
+        self.tick_no += 1
 
 
 # pygame setup
 pygame.init()
 font = pygame.font.SysFont("Courier New", 20)
+pygame.mixer.init()
+sound = pygame.mixer.Sound("die.wav")
 screen = pygame.display.set_mode((1280, 720))
 clock = pygame.time.Clock()
 running = True
 dt = 0
 
-model = Model()
+# constants
+fps = 60
 square_edge = 30
 scale = int(720 / square_edge)
 margin = int(scale * 0.1)
+
+# gui state
+model = Model()
+frame = 0
+explosions = {}  # coords => frame
+last_tick = 0
+sim_speed = 5
+
 while running:
     # poll for events
     # pygame.QUIT event means the user clicked X to close your window
@@ -138,6 +165,17 @@ while running:
     model.setup(2, square_edge, square_edge)
     if frame % (fps // sim_speed) == 0:
         model.tick()
+        last_tick = frame
+        for dead in model.dead:
+            explosions[dead] = frame
+            sound.play()
+
+    to_clear = set()
+    for k, v in explosions.items():
+        if frame > v + 2 * fps:
+            to_clear.add(k)
+    for k in to_clear:
+        del explosions[k]
 
     spawns = set()
     for player in model.players:
@@ -156,19 +194,44 @@ while running:
                 if x % 2 == y % 2:
                     color = (20, 20, 20)
                 pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+            if (x, y) in explosions:
+                color = "white"
+                if int(frame - explosions[(x, y)]) % 2 == 0:
+                    color = "black"
+                pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
 
+    for x in range(model.map_w):
+        for y in range(model.map_h):
             # draw object if needed
             obj = model.map[(x, y)]
             if obj:
                 # something is there
+                move_x = 0
+                move_y = 0
+                if (x, y) in model.moves:
+                    # animate
+                    old_pos = model.moves[(x, y)]
+                    dx = x - old_pos[0]
+                    dy = y - old_pos[1]
+                    mag = (frame - last_tick) / (fps // sim_speed) - 1.0
+                    move_x = dx * mag * scale
+                    move_y = dy * mag * scale
+                    if False and model.map[(x, y)].id % 20 == 0:
+                        debug("animate",
+                                {"frame": frame, "last_tick": last_tick,
+                                    "pos": (x, y), "diff": (dx, dy), "mag": mag,
+                                    "move": (move_x, move_y)})
                 hue = 360 * obj.player.index / len(model.players) + (obj.skin[0] / 12)
                 hue = int(hue) % 360
                 color = pygame.Color(0)
                 color.hsva = (int(hue), 95,
                         100 - (obj.skin[1] // 8),
                         100 - (obj.skin[2] // 8))
-                pygame.draw.rect(screen, color, (x * scale + margin, y * scale + margin,
-                    scale - margin * 2, scale - margin * 2))
+                pygame.draw.rect(screen, color, (
+                    int(x * scale + margin + move_x),
+                    int(y * scale + margin + move_y),
+                    scale - margin * 2,
+                    scale - margin * 2), 0, int(scale / 6))
 
     # print debug
     for i, line in enumerate(terminal_lines):
