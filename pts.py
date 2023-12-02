@@ -12,25 +12,6 @@ def debug(*args):
   if len(terminal_lines) > 20:
     terminal_lines.pop(0)
 
-def circle(center, radius, border=False):
-  # (x-a)^2 + (y-b)^2 = r^2
-  # => y = b +-sqrt(r^2 - (x-a)^2)
-  a = center[0]
-  b = center[1]
-  for x in range(a - radius, a + radius + 1):
-    s = math.sqrt(radius ** 2 - (x - a) ** 2)
-    for y in [b + s, b - s]:
-      y = int(round(y))
-      yield (x, y)
-      if border:
-        # also round inwards
-        # TODO this is jank
-        x2 = x - 1 if x > 0 else x + 1
-        y2 = y - 1 if y > 0 else y + 1
-        yield (x2, y)
-        yield (x, y2)
-        yield (x2, y2)
-
 class Player:
   def __init__(self, index, spawnpoint):
     self.index = index
@@ -57,56 +38,89 @@ class Unit(Idd):
     self.skin = (random.randint(1, 255),
         random.randint(1, 255),
         random.randint(1, 255))
+    self.active_order = None
 
   def __str__(self):
     return "[unit player={}]".format(self.player.index)
 
+  def order(self, client, pos):
+    self.active_order = pos
+
+  # form near the spawn
+  def idle_spawn(self, client, pos):
+    fan_width = 4
+    fan_depth = 4
+    dx, dy = 0, 0
+    if self.player.spawnpoint[1] >= client.map_h // 2:
+      if pos[1] > self.player.spawnpoint[1] - fan_depth:
+        dy = -1
+    else:
+      if pos[1] < self.player.spawnpoint[1] + fan_depth:
+        dy = 1
+    if pos[0] > client.map_w // 2 - fan_width and pos[0] < client.map_w // 2 + fan_width:
+      dx = random.randint(-1, 1)
+    return (dx, dy)
+
+  def get_move(self, client, pos):
+    if not self.active_order:
+      return self.idle_spawn(client, pos)
+    dx, dy = 0, 0
+    if self.active_order[0] < pos[0]:
+      dx = -1
+    elif self.active_order[0] > pos[0]:
+      dx = 1
+    if self.active_order[1] < pos[1]:
+      dy = -1
+    elif self.active_order[1] > pos[1]:
+      dy = 1
+    return (dx, dy)
+
 class Event(Idd):
   # if old_pos is None, the unit is spawning
   # if new_pos is None, the unit is dying
-  def __init__(self, tick, unit, old_pos, new_pos, acl=None):
+  def __init__(self, tick, unit, old_pos, new_pos):
     Idd.__init__(self)
     self.tick = tick
     self.unit = unit
     self.old_pos = old_pos
     self.new_pos = new_pos
-    self.acl = acl or set([unit.player])
 
 class Client:
   def __init__(self):
     self.initialized = False
 
-  def setup(self, player_index, map_w, map_h):
+  def setup(self, player, map_w, map_h):
     if self.initialized:
       return
-    self.player_index = player_index
+    self.player = player
+    self.player_index = player.index
     self.map_w = map_w
     self.map_h = map_h
     self.dead = set()
     self.spawned = set()
     self.perma_dead = set()
     self.units = {}  # unit => position
-    self.unit_seen = collections.defaultdict(lambda: -1)  # unit => last tick seen
+    self.map = collections.defaultdict(lambda: None)  # position => unit
     self.seen_events = set()  # IDs
     self.initialized = True
 
-  def handle_event(self, event, tick):
+  def handle_event(self, event):
     if event.id in self.seen_events:
       return
-    self.unit_seen[event.unit] = max(tick, self.unit_seen[event.unit])
-    if event.unit.player.index != self.player_index and event.unit not in self.units:
-      # enemy spotted
-      play_sound(spot_sounds)
     self.seen_events.add(event.id)
     if event.new_pos and not event.old_pos:
       self.spawned.add(event.new_pos)
     if event.old_pos and not event.new_pos:
       self.dead.add(event.old_pos)
       self.perma_dead.add(event.unit)
-      if event.unit in self.units:
+      try:
         del self.units[event.unit]
+        del self.map[event.old_pos]
+      except:
+        pass
     if event.new_pos and event.unit not in self.perma_dead:
       self.units[event.unit] = event.new_pos
+      self.map[event.new_pos] = event.unit
 
   def tick(self):
     self.dead.clear()
@@ -135,6 +149,7 @@ class Server:
     for x in range(map_w):
       for y in range(map_h):
         self.map[(x, y)] = None
+    self.new_map = dict(self.map)
     self.players = []
     center = (map_w / 2, map_h / 2)
     radius = min(map_w, map_h) / 2 * (7 / 8)
@@ -149,15 +164,32 @@ class Server:
     self.event_centers[event] = (pos, 0)
 
   def expand_events(self):
+    def circle(center, radius):
+      # (x-a)^2 + (y-b)^2 = r^2
+      # => y = b +-sqrt(r^2 - (x-a)^2)
+      a = center[0]
+      b = center[1]
+      for x in range(a - radius, a + radius + 1):
+        s = math.sqrt(radius ** 2 - (x - a) ** 2)
+        for y in [b + s, b - s]:
+          y = int(round(y))
+          yield (x, y)
+          # also round inwards
+          # TODO this is jank
+          x2 = x - 1 if x > 0 else x + 1
+          y2 = y - 1 if y > 0 else y + 1
+          yield (x2, y)
+          yield (x, y2)
+          yield (x2, y2)
     to_delete = []
     to_set = []
     for event, el in self.event_centers.items():
       center, radius = el
-      for x, y in circle(center, radius, border=True):
+      for x, y in circle(center, radius):
         if event in self.event_map[(x, y)]:
           self.event_map[(x, y)].remove(event)
       inside = False
-      for x, y in circle(center, radius + 1, border=True):
+      for x, y in circle(center, radius + 1):
         if x >= 0 and x < self.map_w and y >= 0 and y < self.map_h:
           inside = True
           self.event_map[(x, y)].add(event)
@@ -175,87 +207,66 @@ class Server:
     if not self.map[pos]:
 #      debug("spawning", unit, "at", pos)
       self.map[pos] = unit
+      self.new_map[pos] = unit
       self.broadcast_event(Event(self.tick_no, unit, old_pos=None, new_pos=pos), pos)
 
-  def move(self, x, y, dx, dy, detour=False):
+  def enqueue_move(self, x, y, dx, dy, detour=False):
     unit = self.map[(x, y)]
     if not unit:
       return
     new_x = max(0, min(x + dx, self.map_w - 1))
     new_y = max(0, min(y + dy, self.map_h - 1))
-    occupied = self.map[(new_x, new_y)]
+    occupied = self.new_map[(new_x, new_y)]
     if occupied:
       if occupied.player.index != unit.player.index:
         # collide, killing both units
         #debug("collision at", new_x, new_y)
-        self.map[(x, y)] = None
-        self.map[(new_x, new_y)] = None
+        self.new_map[(x, y)] = None
+        self.new_map[(new_x, new_y)] = None
         self.broadcast_event(Event(self.tick_no, unit,
           old_pos=(x, y), new_pos=(new_x, new_y)), (new_x, new_y))
         self.broadcast_event(Event(self.tick_no, unit,
-          old_pos=(new_x, new_y), new_pos=None,
-          acl=set([unit.player, occupied.player])), (new_x, new_y))
+          old_pos=(new_x, new_y), new_pos=None), (new_x, new_y))
         self.broadcast_event(Event(self.tick_no, occupied,
-          old_pos=(new_x, new_y), new_pos=None,
-          acl=set([unit.player, occupied.player])), (new_x, new_y))
+          old_pos=(new_x, new_y), new_pos=None), (new_x, new_y))
         return
       if detour:
         # it's one of our own, just try once to move around it
         dx = ((dx + 1) % 2) - 1
         dy = ((dy + 1) % 2) - 1
-        self.move(x, y, dx, dy, detour=False)
-      else:
-        # broadcast that I'm stuck
-        self.broadcast_event(Event(self.tick_no, unit,
-          old_pos=(x, y), new_pos=(x, y)), (x, y))
+        self.enqueue_move(x, y, dx, dy, detour=False)
       return
     self.broadcast_event(Event(self.tick_no, unit,
       old_pos=(x, y), new_pos=(new_x, new_y)), (x, y))
-    self.map[(new_x, new_y)] = self.map[(x, y)]
-    self.map[(x, y)] = None
+    self.new_map[(new_x, new_y)] = self.new_map[(x, y)]
+    self.new_map[(x, y)] = None
+
+  def execute_moves(self):
+    self.map = dict(self.new_map)
 
   def spawn_phase(self):
     for player in self.players:
       self.spawn(Unit(player), player.spawnpoint)
 
-  def look(self, unit, pos, los=10):
-    for radius in range(los):
-      for x, y in circle(pos, radius, border=False):
-        if x < 0 or x >= self.map_w: continue
-        if y < 0 or y >= self.map_h: continue
-        unit2 = self.map[(x, y)]
-        if unit2 and unit2.player != unit.player:
-          self.broadcast_event(Event(self.tick_no, unit2,
-            old_pos=(x, y), new_pos=(x, y), acl=set([unit.player])), pos)
-
   def tick(self):
     move_speed = 10
-    spawn_rate = 100
+    spawn_rate = 200
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
       unit = self.map[(x, y)]
       if not unit:
         return
-      target_x = int(unit.personality / 255 * self.map_w)
-      dx = 0
-      if x < target_x:
-        dx = 1
-      elif x > target_x:
-        dx = -1
-      dy = -1
-      if unit.player.index == 1:
-        dy = 1
-      self.move(x, y, dx, dy, detour=True)
-      self.look(unit, (x, y))
+      (dx, dy) = unit.get_move(self.clients[unit.player.index], (x, y))
+      self.enqueue_move(x, y, dx, dy, detour=True)
     if self.tick_no % move_speed == 0:
       self.for_all_squares(move)
+    self.execute_moves()
     if self.tick_no % self.event_speed == 0:
       self.expand_events()
     for client in self.clients:
       for event in self.event_map[self.players[client.player_index].spawnpoint]:
-        if self.players[client.player_index] in event.acl:
-          client.handle_event(event, self.tick_no)
+        client.handle_event(event)
     self.tick_no += 1
 
 
@@ -264,9 +275,11 @@ pygame.init()
 font = pygame.font.SysFont("Courier New", 20)
 pygame.mixer.init()
 sounds = lambda names: [pygame.mixer.Sound(d + ".wav") for d in names]
-play_sound = lambda sounds: None
-#play_sound = lambda sounds: sounds[random.randint(0, len(sounds) - 1)].play()
+play_sound = lambda sounds: sounds[random.randint(0, len(sounds) - 1)].play()
 die_sounds = sounds(["die", "die2"])
+attack_sounds = sounds(["attack", "attack2"])
+recall_sounds = sounds(["recall", "recall2"])
+hi_sounds = sounds(["hi", "hi2"])
 spawn_sounds = sounds(["spawn"])
 spot_sounds = sounds(["spot"])
 screen = pygame.display.set_mode((1280, 720))
@@ -283,10 +296,18 @@ margin = int(scale * 0.1)
 # gui state
 server = Server()
 client = Client()
+ai = Client()
 frame = 0
 explosions = {}  # coords => frame
 last_tick = 0
 sim_speed = 30
+select_start = None
+select_end = None
+selected_units = set()
+selected_pos = None
+def pos_to_square(pos):
+  return (pos[0] // scale, pos[1] // scale)
+  return (round(pos[0] / scale), round(pos[1] / scale))
 
 while running:
   # poll for events
@@ -294,12 +315,48 @@ while running:
   for event in pygame.event.get():
     if event.type == pygame.QUIT:
       running = False
+    elif event.type == pygame.MOUSEBUTTONDOWN:
+      if event.button == 1:  # left click
+        select_start = event.pos
+      elif event.button == 3:  # right click
+        if selected_units: # order move
+          dst = pos_to_square(event.pos)
+          if dst[1] <= selected_pos[1]:
+            play_sound(attack_sounds)
+          else:
+            play_sound(recall_sounds)
+          for unit in selected_units:
+            unit.order(client, dst)
+          selected_units.clear()
+    elif event.type == pygame.MOUSEBUTTONUP:
+      if event.button == 1:      
+        if select_start and select_end:
+          square_start = pos_to_square(select_start)
+          square_end = pos_to_square(select_end)
+          selected_units.clear()
+          for x in range(min(square_start[0], square_end[0]),
+                         max(square_start[0], square_end[0])):
+            for y in range(min(square_start[1], square_end[1]),
+                           max(square_start[1], square_end[1])):
+              unit = client.map[(x, y)]
+              if unit and unit.player.index == 0:
+                selected_pos = (x, y)
+                selected_units.add(unit)
+          select_start = None
+          select_end = None
+          if selected_units:
+            play_sound(hi_sounds)
+
+    elif event.type == pygame.MOUSEMOTION:
+      if select_start:
+        select_end = event.pos
 
   # fill the screen with a color to wipe away anything from last frame
   screen.fill("black")
   
-  client.setup(0, square_edge, square_edge)
-  server.setup(2, square_edge, square_edge, [client])
+  server.setup(2, square_edge, square_edge, [client, ai])
+  client.setup(server.players[0], square_edge, square_edge)
+  ai.setup(server.players[1], square_edge, square_edge)
   if frame % (fps // sim_speed) == 0:
     server.tick()
     last_tick = frame
@@ -371,16 +428,24 @@ while running:
     hue = 360 * unit.player.index / len(server.players) + (unit.skin[0] / 12)
     hue = int(hue) % 360
     color = pygame.Color(0)
-    age = max(0, server.tick_no - client.unit_seen[unit] - 10)
-    if (age < 80):
-      color.hsva = (int(hue), 95,
-          int(max(0, max(50, 100 - (unit.skin[1] // 8) - distance * 2) - age)),
-          max(50, 100 - (unit.skin[2] // 8)))
-      pygame.draw.rect(screen, color, (
-        int(x * scale + margin + move_x),
-        int(y * scale + margin + move_y),
-        scale - margin * 2,
-        scale - margin * 2), 0, int(scale / 6))
+    color.hsva = (int(hue), 95,
+        int(max(50, 100 - (unit.skin[1] // 8) - distance * 2)),
+        max(50, 100 - (unit.skin[2] // 8)))
+    if unit in selected_units:
+      color = "white"
+    pygame.draw.rect(screen, color, (
+      int(x * scale + margin + move_x),
+      int(y * scale + margin + move_y),
+      scale - margin * 2,
+      scale - margin * 2), 0, int(scale / 6))
+
+  if select_end:
+    select_rect = pygame.Rect(
+            min(select_start[0], select_end[0]),
+            min(select_start[1], select_end[1]),
+            abs(select_start[0] - select_end[0]),
+            abs(select_start[1] - select_end[1]))
+    pygame.draw.rect(screen, "white", select_rect, 2)
 
   # print debug
   for i, line in enumerate(terminal_lines):
