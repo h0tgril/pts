@@ -6,13 +6,17 @@ import collections
 
 event_speed = 5
 
+frame = 0
 terminal_lines = []
+last_print = 0
 def debug(*args):
+  global last_print
   text = " ".join(str(a) for a in args)
   print(text)
   terminal_lines.append(text)
   if len(terminal_lines) > 20:
     terminal_lines.pop(0)
+  last_print = frame
 
 def circle(center, radius, border=True):
   # (x-a)^2 + (y-b)^2 = r^2
@@ -60,6 +64,7 @@ class Unit(Idd):
         random.randint(1, 255))
     self.active_order = None
     self.last_command_seq = -1
+    self.time = 0
 
   def __str__(self):
     return "[unit player={}]".format(self.player.index)
@@ -89,7 +94,37 @@ class Unit(Idd):
       dx = random.randint(-1, 1)
     return (dx, dy)
 
+  def ai_move(self, client, pos):
+    strat = self.id % 3
+    dy = 0
+    dx = random.randint(-1, 1)
+    time = self.time
+    if strat == 0: # attacker
+      if time < 8 or time > 20:
+        # move up towards center, then rush in
+        dy = 1
+      if pos[1] >= client.map_h - 2:
+        # too far, go back
+        dy = -1
+      if time > 40:
+        # close in the flanks
+        dx = -1 if pos[0] > client.map_w // 2 else 1
+    elif strat == 1: # mid
+      # move to center, then sit there
+      if y < client.map_h // 2:
+        dy = 1
+    elif strat == 2: # defender
+      # sit close to spawn
+      if pos[1] < 5:
+        dy = 1
+      else:
+        dx = 0
+    return (dx, dy)
+
   def get_move(self, client, pos):
+    self.time += 1
+    if client.ai:
+      return self.ai_move(client, pos)
     if not self.active_order:
       return self.idle_spawn(client, pos)
     dx, dy = 0, 0
@@ -124,9 +159,10 @@ class Client:
   def __init__(self):
     self.initialized = False
 
-  def setup(self, player, map_w, map_h):
+  def setup(self, player, map_w, map_h, ai=False):
     if self.initialized:
       return
+    self.ai = ai
     self.player = player
     self.player_index = player.index
     self.map_w = map_w
@@ -298,7 +334,7 @@ class Server:
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 200
+    spawn_rate = 500
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
@@ -346,7 +382,6 @@ margin = int(scale * 0.1)
 server = Server()
 client = Client()
 ai = Client()
-frame = 0
 explosions = {}  # coords => frame
 last_tick = 0
 sim_speed = 30
@@ -394,6 +429,7 @@ while running:
           select_start = None
           select_end = None
           if selected_units:
+            debug("selected", len(selected_units), "units")
             play_sound(hi_sounds)
 
     elif event.type == pygame.MOUSEMOTION:
@@ -405,7 +441,7 @@ while running:
   
   server.setup(2, square_edge, square_edge, [client, ai])
   client.setup(server.players[0], square_edge, square_edge)
-  ai.setup(server.players[1], square_edge, square_edge)
+  ai.setup(server.players[1], square_edge, square_edge, ai=True)
   if frame % (fps // sim_speed) == 0:
     server.tick()
     last_tick = frame
@@ -505,6 +541,8 @@ while running:
                          radius * scale * 2, 1)
 
   # print debug
+  if len(terminal_lines) > 0 and frame - last_print > fps * 2:
+    terminal_lines.pop(0)
   for i, line in enumerate(terminal_lines):
     text_surface = font.render(line, True, (255, 255, 255))
     screen.blit(text_surface, (10, 10 + i * font.get_height()))
