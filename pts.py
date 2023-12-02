@@ -4,6 +4,8 @@ import math
 import random
 import collections
 
+event_speed = 5
+
 terminal_lines = []
 def debug(*args):
   text = " ".join(str(a) for a in args)
@@ -11,6 +13,24 @@ def debug(*args):
   terminal_lines.append(text)
   if len(terminal_lines) > 20:
     terminal_lines.pop(0)
+
+def circle(center, radius, border=True):
+  # (x-a)^2 + (y-b)^2 = r^2
+  # => y = b +-sqrt(r^2 - (x-a)^2)
+  a = center[0]
+  b = center[1]
+  for x in range(a - radius, a + radius + 1):
+    s = math.sqrt(radius ** 2 - (x - a) ** 2)
+    for y in [b + s, b - s]:
+      y = int(round(y))
+      yield (x, y)
+      # also round inwards
+      # TODO this is jank
+      x2 = x - 1 if x > 0 else x + 1
+      y2 = y - 1 if y > 0 else y + 1
+      yield (x2, y)
+      yield (x, y2)
+      yield (x2, y2)
 
 class Player:
   def __init__(self, index, spawnpoint):
@@ -39,12 +59,20 @@ class Unit(Idd):
         random.randint(1, 255),
         random.randint(1, 255))
     self.active_order = None
+    self.last_command_seq = -1
 
   def __str__(self):
     return "[unit player={}]".format(self.player.index)
 
-  def order(self, client, pos):
-    self.active_order = pos
+  def command(self, command):
+    if command.player != self.player or self not in command.units:
+      # ignore commands not meant for me
+      return
+    if command.id <= self.last_command_seq:
+      # ignore stale/duplicate commands
+      return
+    self.active_order = command.pos
+    self.last_command_seq = command.id
 
   # form near the spawn
   def idle_spawn(self, client, pos):
@@ -74,6 +102,13 @@ class Unit(Idd):
     elif self.active_order[1] > pos[1]:
       dy = 1
     return (dx, dy)
+
+class Command(Idd):
+  def __init__(self, player, units, pos):
+    Idd.__init__(self)
+    self.player = player
+    self.units = units
+    self.pos = pos
 
 class Event(Idd):
   # if old_pos is None, the unit is spawning
@@ -139,13 +174,15 @@ class Server:
     if self.initialized:
       return
     self.clients = clients
-    self.event_speed = 5
+    self.event_speed = event_speed
     self.tick_no = 0
     self.map_w = map_w
     self.map_h = map_h
     self.map = {}
     self.event_centers = {}  # event => (center point, radius)
     self.event_map = collections.defaultdict(set)  # point => set of events
+    self.command_centers = {}  # command => (center point, radius)
+    self.command_map = collections.defaultdict(set)  # point => set of commands
     for x in range(map_w):
       for y in range(map_h):
         self.map[(x, y)] = None
@@ -163,24 +200,10 @@ class Server:
   def broadcast_event(self, event, pos):
     self.event_centers[event] = (pos, 0)
 
+  def broadcast_command(self, command, pos):
+    self.command_centers[command] = (pos, 0)
+
   def expand_events(self):
-    def circle(center, radius):
-      # (x-a)^2 + (y-b)^2 = r^2
-      # => y = b +-sqrt(r^2 - (x-a)^2)
-      a = center[0]
-      b = center[1]
-      for x in range(a - radius, a + radius + 1):
-        s = math.sqrt(radius ** 2 - (x - a) ** 2)
-        for y in [b + s, b - s]:
-          y = int(round(y))
-          yield (x, y)
-          # also round inwards
-          # TODO this is jank
-          x2 = x - 1 if x > 0 else x + 1
-          y2 = y - 1 if y > 0 else y + 1
-          yield (x2, y)
-          yield (x, y2)
-          yield (x2, y2)
     to_delete = []
     to_set = []
     for event, el in self.event_centers.items():
@@ -201,6 +224,31 @@ class Server:
       self.event_centers[event] = (center, radius)
     for event in to_delete:
       del self.event_centers[event]
+
+  def expand_commands(self):
+    to_delete = []
+    to_set = []
+    for command, el in self.command_centers.items():
+      center, radius = el
+      for x, y in circle(center, radius):
+        if command in self.command_map[(x, y)]:
+          self.command_map[(x, y)].remove(command)
+      inside = False
+      for x, y in circle(center, radius + 1):
+        if x >= 0 and x < self.map_w and y >= 0 and y < self.map_h:
+          inside = True
+          self.command_map[(x, y)].add(command)
+          unit = self.map[(x, y)]
+          if unit:
+            unit.command(command)
+      if inside:
+        to_set.append((command, center, radius + 1))
+      else:
+        to_delete.append(command)
+    for command, center, radius in to_set:
+      self.command_centers[command] = (center, radius)
+    for command in to_delete:
+      del self.command_centers[command]
 
 
   def spawn(self, unit, pos):
@@ -264,6 +312,7 @@ class Server:
     self.execute_moves()
     if self.tick_no % self.event_speed == 0:
       self.expand_events()
+      self.expand_commands()
     for client in self.clients:
       for event in self.event_map[self.players[client.player_index].spawnpoint]:
         client.handle_event(event)
@@ -307,7 +356,8 @@ selected_units = set()
 selected_pos = None
 def pos_to_square(pos):
   return (pos[0] // scale, pos[1] // scale)
-  return (round(pos[0] / scale), round(pos[1] / scale))
+def square_to_pos(square):
+  return (square[0] * scale + scale // 2, square[1] * scale + scale // 2)
 
 while running:
   # poll for events
@@ -325,15 +375,14 @@ while running:
             play_sound(attack_sounds)
           else:
             play_sound(recall_sounds)
-          for unit in selected_units:
-            unit.order(client, dst)
-          selected_units.clear()
+          command = Command(server.players[0], set(selected_units), dst)
+          server.broadcast_command(command, server.players[0].spawnpoint)
     elif event.type == pygame.MOUSEBUTTONUP:
       if event.button == 1:      
         if select_start and select_end:
           square_start = pos_to_square(select_start)
           square_end = pos_to_square(select_end)
-          selected_units.clear()
+          selected_units = set()
           for x in range(min(square_start[0], square_end[0]),
                          max(square_start[0], square_end[0])):
             for y in range(min(square_start[1], square_end[1]),
@@ -446,6 +495,14 @@ while running:
             abs(select_start[0] - select_end[0]),
             abs(select_start[1] - select_end[1]))
     pygame.draw.rect(screen, "white", select_rect, 2)
+
+  # animate commands (not to scale)
+  for command, val in server.command_centers.items():
+    center, radius = val
+    if command.player == server.players[0] and radius < 4:
+      pygame.draw.circle(screen, (0, 100, 0),
+                         square_to_pos(center),
+                         radius * scale * 2, 1)
 
   # print debug
   for i, line in enumerate(terminal_lines):
