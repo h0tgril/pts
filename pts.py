@@ -63,6 +63,7 @@ class Client:
     self.map_w = map_w
     self.map_h = map_h
     self.dead = set()
+    self.spawned = set()
     self.perma_dead = set()
     self.units = {}  # unit => position
     self.seen_events = set()  # IDs
@@ -72,6 +73,8 @@ class Client:
     if event.id in self.seen_events:
       return
     self.seen_events.add(event.id)
+    if event.new_pos and not event.old_pos:
+      self.spawned.add(event.new_pos)
     if event.old_pos and not event.new_pos:
       self.dead.add(event.old_pos)
       self.perma_dead.add(event.unit)
@@ -81,6 +84,7 @@ class Client:
 
   def tick(self):
     self.dead.clear()
+    self.spawned.clear()
 
 class Server:
   def __init__(self):
@@ -206,7 +210,7 @@ class Server:
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 30
+    spawn_rate = 100
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
@@ -238,7 +242,8 @@ class Server:
 pygame.init()
 font = pygame.font.SysFont("Courier New", 20)
 pygame.mixer.init()
-sound = pygame.mixer.Sound("die.wav")
+die_sounds = [pygame.mixer.Sound(d + ".wav") for d in ["die", "die2"]]
+spawn_sounds = [pygame.mixer.Sound(d + ".wav") for d in ["spawn"]]
 screen = pygame.display.set_mode((1280, 720))
 clock = pygame.time.Clock()
 running = True
@@ -273,10 +278,12 @@ while running:
   if frame % (fps // sim_speed) == 0:
     server.tick()
     last_tick = frame
+    for spawned in client.spawned:
+      spawn_sounds[random.randint(0, len(spawn_sounds) - 1)].play()
     for dead in client.dead:
     #  debug("explosion at", dead, ", frame", frame)
       explosions[dead] = frame
-      sound.play()
+      die_sounds[random.randint(0, len(die_sounds) - 1)].play()
     client.tick()
 
   to_clear = set()
