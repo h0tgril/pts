@@ -52,7 +52,7 @@ class Idd:
     return hash(self.id)
 
   def __eq__(self, other):
-    return self.id == other.id
+    return hash(self.id)
 
   def __lt__(self, other):
     return self.id < other.id
@@ -82,18 +82,19 @@ class Unit(Idd):
     if command.id <= self.last_command_seq:
       # ignore stale/duplicate commands
       return
-    max_width = int(math.ceil(1.25 * math.sqrt(len(command.units))))
+    max_width = 4
     pos = command.pos
-    dx, dy = 0, -1
-    sunits = sorted(list(command.units.keys()), key=lambda unit: command.units[unit][0] + len(command.units) * command.units[unit][1])
+    dx, dy = 0, 0
+    sunits = sorted(list(command.units))
     for idx, unit in enumerate(sunits):
-      if idx % max_width == 0:
+      if idx % max_width == max_width - 1:
         dy += 1
         dx = 0
-      if unit == self:
+      pos = (pos[0] + dx, pos[1] + dy)
+      if unit.id == self.id:
         break
       dx += 1
-    pos = (pos[0] + dx, pos[1] + dy)
+    debug("unit", self.id, "will move to", pos)
     self.active_order = pos
     self.last_command_seq = command.id
 
@@ -157,7 +158,6 @@ class Unit(Idd):
     return (dx, dy)
 
 class Command(Idd):
-  # units is dict of unit -> selected position
   def __init__(self, player, units, pos):
     Idd.__init__(self)
     self.player = player
@@ -354,7 +354,7 @@ class Server:
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 500
+    spawn_rate = 50
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
@@ -407,7 +407,7 @@ last_tick = 0
 sim_speed = 30
 select_start = None
 select_end = None
-selected_units = {}
+selected_units = set()
 selected_pos = None
 def pos_to_square(pos):
   return (pos[0] // scale, pos[1] // scale)
@@ -430,14 +430,14 @@ while running:
             play_sound(attack_sounds)
           else:
             play_sound(recall_sounds)
-          command = Command(server.players[0], dict(selected_units), dst)
+          command = Command(server.players[0], set(selected_units), dst)
           server.broadcast_command(command, server.players[0].spawnpoint)
     elif event.type == pygame.MOUSEBUTTONUP:
       if event.button == 1:      
         if select_start and select_end:
           square_start = pos_to_square(select_start)
           square_end = pos_to_square(select_end)
-          selected_units = {}
+          selected_units = set()
           for x in range(min(square_start[0], square_end[0]),
                          max(square_start[0], square_end[0])):
             for y in range(min(square_start[1], square_end[1]),
@@ -446,7 +446,7 @@ while running:
               for unit in units:
                 if unit.player.index == 0:
                   selected_pos = (x, y)
-                  selected_units[unit] = (x, y)
+                  selected_units.add(unit)
           select_start = None
           select_end = None
           if selected_units:
@@ -537,7 +537,7 @@ while running:
     color.hsva = (int(hue), 95,
         int(max(50, 100 - (unit.skin[1] // 8) - distance * 2)),
         max(50, 100 - (unit.skin[2] // 8)))
-    if unit in selected_units.keys():
+    if unit in selected_units:
       color = "white"
     pygame.draw.rect(screen, color, (
       int(x * scale + margin + move_x),
