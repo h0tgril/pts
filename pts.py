@@ -9,6 +9,7 @@ event_speed = 5
 frame = 0
 terminal_lines = []
 last_print = 0
+messages = set()
 def debug(*args):
   global last_print
   text = " ".join(str(a) for a in args)
@@ -17,8 +18,15 @@ def debug(*args):
   if len(terminal_lines) > 20:
     terminal_lines.pop(0)
   last_print = frame
+def udebug(mid, *args):
+  text = " ".join(str(a) for a in args)
+  key = (mid, text)
+  if key in messages:
+    return
+  messages.add(key)
+  debug(text)
 
-def circle(center, radius, border=True):
+def circlegen(center, radius, border=True):
   # (x-a)^2 + (y-b)^2 = r^2
   # => y = b +-sqrt(r^2 - (x-a)^2)
   a = center[0]
@@ -35,6 +43,10 @@ def circle(center, radius, border=True):
       yield (x2, y)
       yield (x, y2)
       yield (x2, y2)
+
+@functools.cache
+def circle(center, radius, border=True):
+  return list(circlegen(center, radius, border))
 
 class Player:
   def __init__(self, index, spawnpoint):
@@ -82,18 +94,24 @@ class Unit(Idd):
     if command.id <= self.last_command_seq:
       # ignore stale/duplicate commands
       return
-    max_width = int(math.ceil(1.25 * math.sqrt(len(command.units))))
     pos = command.pos
-    dx, dy = 0, -1
-    sunits = sorted(list(command.units.keys()), key=lambda unit: command.units[unit][0] + len(command.units) * command.units[unit][1])
-    for idx, unit in enumerate(sunits):
-      if idx % max_width == 0:
-        dy += 1
-        dx = 0
-      if unit == self:
-        break
-      dx += 1
-    pos = (pos[0] + dx, pos[1] + dy)
+
+    # sort by x, break ties by y
+    sunits= sorted(list(command.units.keys()),
+                   key=lambda unit: (command.units[unit][0], command.units[unit][1]))
+    num_cols = int(math.ceil(1.25 * math.sqrt(len(command.units))))
+    num_rows = len(command.units) // num_cols + 1
+    udebug(command.id, "formation", num_cols, "x", num_rows)
+    formation = {}
+    i = 0
+    for col in range(num_cols):
+      for row in range(num_rows):
+        if i >= len(sunits):
+          break
+        formation[sunits[i]] = (col, row)
+        i += 1
+    spot = formation[self]
+    pos = (pos[0] + spot[0], pos[1] + spot[1])
     self.active_order = pos
     self.last_command_seq = command.id
 
@@ -354,7 +372,7 @@ class Server:
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 500
+    spawn_rate = 10
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
