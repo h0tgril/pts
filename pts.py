@@ -272,14 +272,14 @@ class Server:
     self.initialized = True
 
   def broadcast_event(self, event, pos):
-    self.event_centers[event] = (pos, 0)
+    self.event_centers[event] = [pos, 0]
 
   def broadcast_command(self, command, pos):
     self.command_centers[command] = (pos, 0)
 
   def expand_events(self):
     to_delete = []
-    to_set = []
+    to_expand = []
     for event, el in self.event_centers.items():
       center, radius = el
       for x, y in circle(center, radius):
@@ -291,11 +291,12 @@ class Server:
           inside = True
           self.event_map[(x, y)].add(event)
       if inside:
-        to_set.append((event, center, radius + 1))
+        to_expand.append(event)
       else:
         to_delete.append(event)
-    for event, center, radius in to_set:
-      self.event_centers[event] = (center, radius)
+    for event in to_expand:
+      cr = self.event_centers[event]
+      cr[1] += 1
     for event in to_delete:
       del self.event_centers[event]
 
@@ -411,7 +412,7 @@ running = True
 dt = 0
 
 # constants
-fps = 60
+fps = 30
 square_edge = 30
 scale = int(720 / square_edge)
 margin = int(scale * 0.1)
