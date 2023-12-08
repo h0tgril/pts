@@ -402,6 +402,7 @@ sounds = lambda names: [pygame.mixer.Sound(d + ".wav") for d in names]
 play_sound = lambda sounds: sounds[random.randint(0, len(sounds) - 1)].play()
 die_sounds = sounds(["die", "die2"])
 attack_sounds = sounds(["attack", "attack2"])
+alert_sounds = sounds(["alert", "alert2"])
 recall_sounds = sounds(["recall", "recall2"])
 hi_sounds = sounds(["hi", "hi2"])
 spawn_sounds = sounds(["spawn"])
