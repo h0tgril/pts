@@ -4,6 +4,10 @@ import math
 import random
 import collections
 
+DEBUG = {
+        "MOVES": True,
+        }
+
 event_speed = 5
 
 frame = 0
@@ -385,11 +389,13 @@ class Server:
 
   def spawn_phase(self):
     for player in self.players:
+      if DEBUG["MOVES"] and player.index > 0:
+        continue
       self.spawn(Unit(player), player.spawnpoint)
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 50
+    spawn_rate = 50 if DEBUG["MOVES"] else 500
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
@@ -423,15 +429,19 @@ recall_sounds = sounds(["recall", "recall2"])
 hi_sounds = sounds(["hi", "hi2"])
 spawn_sounds = sounds(["spawn"])
 spot_sounds = sounds(["spot"])
-screen = pygame.display.set_mode((1280, 720))
+RES_X = 720
+RES_Y = 720
+screen = pygame.display.set_mode((RES_X, RES_Y))
 clock = pygame.time.Clock()
 running = True
 dt = 0
 
 # constants
 fps = 30
-square_edge = 30
-scale = int(720 / square_edge)
+square_edge = 100
+base_scale = int(720 / square_edge)
+scale = base_scale
+zoom = 1
 margin = int(scale * 0.1)
 
 # gui state
@@ -446,10 +456,11 @@ select_end = None
 selected_units = {}
 selected_pos = None
 waypoints = []
+camera = (0, 0)
 def pos_to_square(pos):
-  return (pos[0] // scale, pos[1] // scale)
+  return ((pos[0] - camera[0]) // scale, (pos[1] - camera[1]) // scale)
 def square_to_pos(square):
-  return (square[0] * scale + scale // 2, square[1] * scale + scale // 2)
+  return (square[0] * scale + scale // 2 + camera[0], square[1] * scale + scale // 2 + camera[1])
 
 while running:
   # poll for events
@@ -457,6 +468,17 @@ while running:
   for event in pygame.event.get():
     if event.type == pygame.QUIT:
       running = False
+    elif event.type == pygame.MOUSEWHEEL:
+      y = event.y * -1
+      if y > 0:
+        y = min(y, 3)
+      if y < 0:
+        y = max(y, -3)
+      mouse_x, mouse_y = pygame.mouse.get_pos()
+      zoom = max(0.75, min(10, zoom - y * 0.1))
+      scale = int(base_scale * zoom)
+      camera = (int(RES_X / 2 - mouse_x * zoom),
+                int(RES_Y / 2 - mouse_y * zoom))
     elif event.type == pygame.MOUSEBUTTONDOWN:
       if event.button == 1:  # left click
         select_start = event.pos
@@ -493,10 +515,22 @@ while running:
           if selected_units:
               #            debug("selected", len(selected_units), "units")
             play_sound(hi_sounds)
-
     elif event.type == pygame.MOUSEMOTION:
       if select_start:
         select_end = event.pos
+  keys = pygame.key.get_pressed()
+  move_x, move_y = 0, 0
+  if keys[pygame.K_w]:
+    move_y += 1
+  if keys[pygame.K_s]:
+    move_y -= 1
+  if keys[pygame.K_a]:
+    move_x += 1
+  if keys[pygame.K_d]:
+    move_x -= 1
+  if move_x != 0 or move_y != 0:
+    camera_speed = scale  * fps / 30
+    camera = (int(camera[0] + move_x * camera_speed), int(camera[1] + move_y * camera_speed))
 
   # fill the screen with a color to wipe away anything from last frame
   screen.fill("black")
@@ -530,7 +564,7 @@ while running:
     hue = 360 * player.index / len(server.players)
     color = pygame.Color(0)
     color.hsva = (int(hue), 35, 100, 100)
-    pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+    pygame.draw.rect(screen, color, (x * scale + camera[0], y * scale + camera[1], scale, scale))
   focal = server.players[0].spawnpoint
   for x in range(server.map_w):
     for y in range(server.map_h):
@@ -541,23 +575,23 @@ while running:
         color = (purple, int(purple * 2 / 3), purple)
         if x % 2 == y % 2:
           color = (10, 10, 10)
-        pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+        pygame.draw.rect(screen, color, (x * scale + camera[0], y * scale + camera[1], scale, scale))
       if (x, y) in explosions:
         color = "white"
         if int(frame - explosions[(x, y)]) % 2 == 0:
           color = "black"
-        pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+        pygame.draw.rect(screen, color, (x * scale + camera[0], y * scale + camera[1], scale, scale))
 
       if False:  # edit to show events
         for event in server.event_map[(x, y)]:
           if event.new_pos: continue   # explosions only
           color = (0, 150 - 3 * (event.id % 20), 0)
-          pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+          pygame.draw.rect(screen, color, (x * scale + camera[0], y * scale + camera[1], scale, scale))
 
   for i, pos in enumerate(waypoints):
     x, y = pos
     color = (0, max(100 - i * 20, 20), 0)
-    pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+    pygame.draw.rect(screen, color, (x * scale + camera[0], y * scale + camera[1], scale, scale))
 
   for unit, pos in client.units.items():
     x, y = pos
@@ -586,8 +620,8 @@ while running:
     if unit in selected_units.keys():
       color = "white"
     pygame.draw.rect(screen, color, (
-      int(x * scale + margin + move_x),
-      int(y * scale + margin + move_y),
+      int(x * scale + margin + move_x) + camera[0],
+      int(y * scale + margin + move_y) + camera[1],
       scale - margin * 2,
       scale - margin * 2), 0, int(scale / 6))
 
@@ -603,8 +637,9 @@ while running:
   for command, val in server.command_centers.items():
     center, radius = val
     if command.player == server.players[0] and radius < 4:
+      pos = square_to_pos(center)
       pygame.draw.circle(screen, (0, 100, 0),
-                         square_to_pos(center),
+                         (pos[0], pos[1]),
                          radius * scale * 2, 1)
 
   # print debug
