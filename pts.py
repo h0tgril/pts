@@ -77,7 +77,9 @@ class Unit(Idd):
     self.skin = (random.randint(1, 255),
         random.randint(1, 255),
         random.randint(1, 255))
-    self.active_order = None
+    self.active_dst = None
+    self.active_waypoint = None
+    self.active_command = None
     self.last_command_seq = -1
     self.time = 0
 
@@ -87,15 +89,7 @@ class Unit(Idd):
   def __repr__(self):
     return str(self)
 
-  def command(self, command):
-    if command.player != self.player or self not in command.units:
-      # ignore commands not meant for me
-      return
-    if command.id <= self.last_command_seq:
-      # ignore stale/duplicate commands
-      return
-    pos = command.pos
-
+  def _formation(self, command, pos):
     # sort by x, break ties by y
     sunits= sorted(list(command.units.keys()),
                    key=lambda unit: (command.units[unit][0], command.units[unit][1]))
@@ -112,7 +106,20 @@ class Unit(Idd):
         i += 1
     spot = formation[self]
     pos = (pos[0] + spot[0], pos[1] + spot[1])
-    self.active_order = pos
+    self.active_dst = pos
+
+  def command(self, command):
+    if command.player != self.player or self not in command.units:
+      # ignore commands not meant for me
+      return
+    if command.id <= self.last_command_seq:
+      # ignore stale/duplicate commands
+      return
+    if self.active_command is None or self.active_command != command:
+      self.active_command = command
+      self.active_waypoint = 0
+    pos = command.pos[self.active_waypoint]
+    self._formation(command, pos)
     self.last_command_seq = command.id
 
   # form near the spawn
@@ -161,21 +168,30 @@ class Unit(Idd):
     self.time += 1
     if client.ai:
       return self.ai_move(client, pos)
-    if not self.active_order:
+    if not self.active_dst:
       return self.idle_spawn(client, pos)
     dx, dy = 0, 0
-    if self.active_order[0] < pos[0]:
+    if self.active_dst[0] < pos[0]:
       dx = -1
-    elif self.active_order[0] > pos[0]:
+    elif self.active_dst[0] > pos[0]:
       dx = 1
-    if self.active_order[1] < pos[1]:
+    if self.active_dst[1] < pos[1]:
       dy = -1
-    elif self.active_order[1] > pos[1]:
+    elif self.active_dst[1] > pos[1]:
       dy = 1
+    if dx == 0 and dy == 0:
+      if self.active_waypoint is not None:
+        self.active_waypoint += 1
+        if self.active_waypoint >= len(self.active_command.pos):
+          self.active_waypoint = None
+          self.active_command = None
+        else:
+          pos = self.active_command.pos[self.active_waypoint]
+          self._formation(self.active_command, pos)
     return (dx, dy)
 
 class Command(Idd):
-  # units is dict of unit -> selected position
+  # units is dict of unit -> selected positions
   def __init__(self, player, units, pos):
     Idd.__init__(self)
     self.player = player
@@ -373,7 +389,7 @@ class Server:
 
   def tick(self):
     move_speed = 10
-    spawn_rate = 10
+    spawn_rate = 50
     if self.tick_no % spawn_rate == 0:
       self.spawn_phase()
     def move(x, y):
@@ -429,6 +445,7 @@ select_start = None
 select_end = None
 selected_units = {}
 selected_pos = None
+waypoints = []
 def pos_to_square(pos):
   return (pos[0] // scale, pos[1] // scale)
 def square_to_pos(square):
@@ -446,12 +463,16 @@ while running:
       elif event.button == 3:  # right click
         if selected_units: # order move
           dst = pos_to_square(event.pos)
-          if dst[1] <= selected_pos[1]:
-            play_sound(attack_sounds)
-          else:
-            play_sound(recall_sounds)
-          command = Command(server.players[0], dict(selected_units), dst)
-          server.broadcast_command(command, server.players[0].spawnpoint)
+          waypoints.append(dst)
+          debug("waypoint", dst)
+          if not (pygame.key.get_mods() & pygame.KMOD_SHIFT):
+            command = Command(server.players[0], dict(selected_units), waypoints)
+            server.broadcast_command(command, server.players[0].spawnpoint)
+            waypoints = []
+            if dst[1] <= selected_pos[1]:
+              play_sound(attack_sounds)
+            else:
+              play_sound(recall_sounds)
     elif event.type == pygame.MOUSEBUTTONUP:
       if event.button == 1:      
         if select_start and select_end:
@@ -532,6 +553,11 @@ while running:
           if event.new_pos: continue   # explosions only
           color = (0, 150 - 3 * (event.id % 20), 0)
           pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
+
+  for i, pos in enumerate(waypoints):
+    x, y = pos
+    color = (0, max(100 - i * 20, 20), 0)
+    pygame.draw.rect(screen, color, (x * scale, y * scale, scale, scale))
 
   for unit, pos in client.units.items():
     x, y = pos
